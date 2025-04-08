@@ -1,0 +1,276 @@
+import sqlite3
+import smtplib
+from email.message import EmailMessage
+from datetime import datetime
+from apscheduler.schedulers.background import BackgroundScheduler
+import tkinter as tk
+from tkinter import messagebox, simpledialog, ttk
+
+# ======================
+# 1. Database Setup
+# ======================
+def init_db():
+    conn = sqlite3.connect('rentals.db')
+    cursor = conn.cursor()
+
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS tenants (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        email TEXT NOT NULL,
+        phone TEXT,
+        rent_due_day INTEGER NOT NULL,
+        rent_amount REAL NOT NULL,
+        lease_start DATE NOT NULL,
+        lease_end DATE,
+        payment_methods TEXT DEFAULT 'Cash,Check,Transfer'
+    )
+    ''')
+
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS payments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tenant_id INTEGER NOT NULL,
+        amount_paid REAL NOT NULL,
+        payment_date TEXT NOT NULL,
+        payment_method TEXT DEFAULT 'Cash',
+        FOREIGN KEY (tenant_id) REFERENCES tenants(id)
+    )
+    ''')
+
+    # Check for missing 'notes' column and add if not exists
+    cursor.execute("PRAGMA table_info(payments)")
+    columns = [row[1] for row in cursor.fetchall()]
+    if 'notes' not in columns:
+        cursor.execute("ALTER TABLE payments ADD COLUMN notes TEXT")
+
+    conn.commit()
+    conn.close()
+
+
+init_db()
+
+# ======================
+# 2. Email Setup
+# ======================
+sender_email = None
+sender_password = None
+
+def setup_email(email, password):
+    global sender_email, sender_password
+    try:
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
+            smtp.login(email, password)
+        sender_email = email
+        sender_password = password
+        return True
+    except Exception:
+        return False
+
+# ======================
+# 3. Reminder Function
+# ======================
+def send_reminder(tenant_email, tenant_name, amount, due_date, late=False):
+    if not sender_email:
+        print("Email not configured.")
+        return False
+
+    msg = EmailMessage()
+    subject = "Overdue Rent Notice" if late else "Rent Reminder"
+    msg['Subject'] = f"{subject} - Payment Due on {due_date}"
+    msg['From'] = sender_email
+    msg['To'] = tenant_email
+
+    body = f"""Dear {tenant_name},
+
+This is a {'FINAL NOTICE' if late else 'friendly reminder'} that your rent payment of ${amount:.2f} is due on {due_date}.
+
+Please make your payment at your earliest convenience.
+
+Thank you,
+Property Management Team
+"""
+    msg.set_content(body)
+
+    try:
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
+            smtp.login(sender_email, sender_password)
+            smtp.send_message(msg)
+        return True
+    except Exception as e:
+        print(f"Email failed: {str(e)}")
+        return False
+
+# ======================
+# 4. GUI - Main Menu
+# ======================
+root = tk.Tk()
+root.title("Rental Management System")
+
+def open_add_tenant():
+    add_win = tk.Toplevel(root)
+    add_win.title("Add Tenant")
+
+    entries = {}
+    labels = [
+        "Name", "Email", "Phone", "Rent Due Day",
+        "Rent Amount", "Lease Start (YYYY-MM-DD)",
+        "Lease End (YYYY-MM-DD)", "Payment Methods"
+    ]
+    for i, label in enumerate(labels):
+        tk.Label(add_win, text=label).grid(row=i, column=0)
+        entries[label] = tk.Entry(add_win)
+        entries[label].grid(row=i, column=1)
+
+    def save_tenant():
+        try:
+            conn = sqlite3.connect('rentals.db')
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO tenants (name, email, phone, rent_due_day, rent_amount, lease_start, lease_end, payment_methods)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', tuple(entry.get() for entry in entries.values()))
+            conn.commit()
+            conn.close()
+            messagebox.showinfo("Success", "Tenant added successfully!")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    tk.Button(add_win, text="Save", command=save_tenant).grid(row=len(labels), column=0, columnspan=2)
+
+def open_view_tenants():
+    view_win = tk.Toplevel(root)
+    view_win.title("View Tenants")
+
+    tree = ttk.Treeview(view_win, columns=("ID", "Name", "Email", "Phone", "Rent"), show='headings')
+    for col in tree["columns"]:
+        tree.heading(col, text=col)
+    tree.pack()
+
+    conn = sqlite3.connect('rentals.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, name, email, phone, rent_amount FROM tenants")
+    for row in cursor.fetchall():
+        tree.insert('', 'end', values=row)
+    conn.close()
+
+def open_record_payment():
+    record_win = tk.Toplevel(root)
+    record_win.title("Record Payment")
+
+    tk.Label(record_win, text="Tenant ID").grid(row=0, column=0)
+    tenant_id_entry = tk.Entry(record_win)
+    tenant_id_entry.grid(row=0, column=1)
+
+    tk.Label(record_win, text="Amount Paid").grid(row=1, column=0)
+    amount_entry = tk.Entry(record_win)
+    amount_entry.grid(row=1, column=1)
+
+    tk.Label(record_win, text="Notes").grid(row=2, column=0)
+    notes_entry = tk.Entry(record_win)
+    notes_entry.grid(row=2, column=1)
+
+    tk.Label(record_win, text="Payment Method").grid(row=3, column=0)
+    method_entry = tk.Entry(record_win)
+    method_entry.insert(0, "Cash")
+    method_entry.grid(row=3, column=1)
+
+    def save_payment():
+        try:
+            conn = sqlite3.connect('rentals.db')
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO payments (tenant_id, amount_paid, payment_date, notes, payment_method)
+                VALUES (?, ?, DATE('now'), ?, ?)
+            ''', (
+                tenant_id_entry.get(),
+                amount_entry.get(),
+                notes_entry.get(),
+                method_entry.get()
+            ))
+            conn.commit()
+            conn.close()
+            messagebox.showinfo("Success", "Payment recorded.")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    tk.Button(record_win, text="Save Payment", command=save_payment).grid(row=4, column=0, columnspan=2)
+
+def open_view_payments():
+    pay_win = tk.Toplevel(root)
+    pay_win.title("Payment History")
+
+    tree = ttk.Treeview(pay_win, columns=("ID", "Tenant ID", "Amount", "Date", "Method"), show='headings')
+    for col in tree["columns"]:
+        tree.heading(col, text=col)
+    tree.pack()
+
+    conn = sqlite3.connect('rentals.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, tenant_id, amount_paid, payment_date, payment_method FROM payments")
+    for row in cursor.fetchall():
+        tree.insert('', 'end', values=row)
+    conn.close()
+
+def open_test_reminder():
+    test_email = simpledialog.askstring("Test Email", "Enter recipient email:")
+    if test_email:
+        if send_reminder(test_email, "Test Tenant", 1200, datetime.now().strftime("%B %d, %Y")):
+            messagebox.showinfo("Sent", f"Test email sent to {test_email}")
+        else:
+            messagebox.showerror("Failed", "Email sending failed.")
+
+# Email Setup
+def configure_email():
+    email = simpledialog.askstring("Email", "Enter Gmail address:")
+    password = simpledialog.askstring("App Password", "Enter App Password:", show="*")
+    if setup_email(email, password):
+        messagebox.showinfo("Configured", "Email setup successful!")
+    else:
+        messagebox.showerror("Failed", "Invalid email or password.")
+
+# ======================
+# 5. Scheduler
+# ======================
+def check_rent_due():
+    today = datetime.now().date()
+    conn = sqlite3.connect('rentals.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT id, name, email, rent_amount, rent_due_day FROM tenants WHERE rent_due_day = ?
+    ''', (today.day,))
+    for tenant in cursor.fetchall():
+        tenant_id, name, email, amount, due_day = tenant
+        cursor.execute('''
+        SELECT 1 FROM payments WHERE tenant_id = ? AND strftime('%Y-%m', payment_date) = strftime('%Y-%m', 'now') LIMIT 1
+        ''', (tenant_id,))
+        if not cursor.fetchone():
+            due_date = today.replace(day=due_day)
+            send_reminder(email, name, amount, due_date.strftime("%B %d, %Y"))
+    conn.close()
+
+scheduler = BackgroundScheduler()
+scheduler.add_job(check_rent_due, 'cron', hour=9)
+scheduler.start()
+
+# ======================
+# 6. Main Menu Buttons
+# ======================
+tk.Label(root, text="Rental Management", font=("Arial", 16)).pack(pady=10)
+
+btns = [
+    ("1. Add Tenant", open_add_tenant),
+    ("2. View Tenants", open_view_tenants),
+    ("3. Record Payment", open_record_payment),
+    ("4. View Payment History", open_view_payments),
+    ("5. Send Test Reminder", open_test_reminder),
+    ("6. Exit", root.quit),
+]
+
+for text, cmd in btns:
+    tk.Button(root, text=text, command=cmd, width=30).pack(pady=3)
+
+tk.Button(root, text="Configure Email", command=configure_email).pack(pady=10)
+
+root.mainloop()
+scheduler.shutdown()
